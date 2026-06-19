@@ -78,8 +78,8 @@ Mở trình duyệt tại `http://localhost:8501`.
          │    DUAL-AGENT SYSTEM      │
          │  (Groq Llama 3)           │
          │                           │
-         │  Agent 1: Weather & Disease│
-         │  Agent 2: Economics       │
+         │ Agent 1: Weather & Disease│
+         │ Agent 2: Economics        │
          └─────────────┬─────────────┘
                        │
          ┌─────────────▼─────────────┐
