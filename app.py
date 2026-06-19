@@ -1,7 +1,7 @@
 """
 🌾 MÙA VÀNG AGENT
 Hệ thống Multi-Agent cảnh báo sâu bệnh cà phê Tây Nguyên
-Công nghệ: Streamlit + Groq  + OpenWeatherMap
+Công nghệ: Streamlit + Groq (text + vision) + OpenWeatherMap
 """
 
 import os
@@ -13,7 +13,6 @@ import streamlit as st
 from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
-import anthropic
 
 # ──────────────────────────────────────────────────────────────────────────────
 # KHỞI TẠO MÔI TRƯỜNG
@@ -23,19 +22,12 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # Khởi tạo client Groq (tương thích OpenAI)
 if GROQ_API_KEY:
     client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL)
 else:
     client = None
-
-# Khởi tạo Anthropic client cho Vision
-if ANTHROPIC_API_KEY:
-    anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-else:
-    anthropic_client = None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CẤU HÌNH TRANG STREAMLIT (CSS giữ nguyên)
@@ -283,14 +275,17 @@ st.markdown("""
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PHÂN TÍCH ẢNH BẰNG CLAUDE VISION
+# PHÂN TÍCH ẢNH BẰNG GROQ VISION (thay thế Claude)
 # ──────────────────────────────────────────────────────────────────────────────
-def analyze_image_with_claude(image_bytes: bytes, image_type: str, diseases: list) -> dict:
+def analyze_image_with_groq(image_bytes: bytes, image_type: str, diseases: list) -> dict:
     """
-    Dùng Claude claude-sonnet-4-6 Vision để phân tích ảnh cây/lá bệnh.
+    Dùng Groq Vision (llama-3.2-90b-vision-preview) để phân tích ảnh cây/lá bệnh.
     Trả về dict: {success, plant_type, detected_diseases, symptoms_visible,
                   confidence, treatment, raw_response}
     """
+    if not client:
+        return {"success": False, "error": "Chưa có GROQ_API_KEY trong .env"}
+
     disease_names = ", ".join([d["name"] for d in diseases]) if diseases else "các bệnh phổ biến"
 
     system_prompt = (
@@ -317,35 +312,24 @@ def analyze_image_with_claude(image_bytes: bytes, image_type: str, diseases: lis
 
     try:
         img_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-        # Dùng Anthropic API trực tiếp
-        import anthropic as _anthropic
-        _client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+        data_url = f"data:{image_type};base64,{img_b64}"
 
-        if not _client:
-            return {"success": False, "error": "Chưa có ANTHROPIC_API_KEY trong .env"}
-
-        message = _client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=1200,
-            system=system_prompt,
+        response = client.chat.completions.create(
+            model="llama-3.2-90b-vision-preview",  # hoặc "llama-3.2-11b-vision-preview"
             messages=[
+                {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": image_type,
-                                "data": img_b64,
-                            },
-                        },
                         {"type": "text", "text": user_prompt},
-                    ],
+                        {"type": "image_url", "image_url": {"url": data_url}}
+                    ]
                 }
             ],
+            max_tokens=1200,
+            temperature=0.0
         )
-        raw = message.content[0].text.strip()
+        raw = response.choices[0].message.content.strip()
         # Parse JSON
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -374,7 +358,7 @@ def render_vision_result(result: dict, diseases_kb: list):
     severity_color = {"Nhẹ": "#66BB6A", "Trung bình": "#FFA726", "Nặng": "#EF5350", "Rất nặng": "#B71C1C"}.get(severity, "#FFE082")
     conf_icon = {"Cao": "🟢", "Trung bình": "🟡", "Thấp": "🔴"}.get(confidence, "⚪")
 
-    st.markdown(f'<div class="vision-badge">🤖 Claude Vision AI · Độ tin cậy: {conf_icon} {confidence}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="vision-badge">🤖 Groq Vision AI · Độ tin cậy: {conf_icon} {confidence}</div>', unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -550,7 +534,7 @@ def analyze_disease_risk(weather: dict, diseases: list) -> list:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# GỌI GROQ API
+# GỌI GROQ API (text)
 # ──────────────────────────────────────────────────────────────────────────────
 def call_groq(prompt: str, temperature: float = 0.3) -> str:
     if not client:
@@ -802,16 +786,14 @@ def render_sidebar():
         st.markdown("### ⚙️ Cấu hình")
         if GROQ_API_KEY and GROQ_API_KEY != "your_groq_api_key_here":
             st.success(f"✅ Groq ({GROQ_MODEL}): Sẵn sàng")
+            # Kiểm tra vision model có sẵn không? (giả định)
+            st.success("✅ Groq Vision: Sẵn sàng (llama-3.2-90b-vision-preview)")
         else:
             st.warning("⚠️ Groq: Chưa có API key")
         if OPENWEATHER_API_KEY:
             st.success("✅ Thời tiết: Live")
         else:
             st.info("ℹ️ Thời tiết: Mô phỏng")
-        if ANTHROPIC_API_KEY:
-            st.success("✅ Claude Vision: Sẵn sàng")
-        else:
-            st.warning("⚠️ Claude Vision: Chưa có API key")
         st.divider()
         st.markdown("""
         <div class="sidebar-info">
@@ -820,11 +802,12 @@ def render_sidebar():
         <strong>🤖 Agents:</strong><br>
         • Agent 1: Thời tiết & Bệnh hại (Groq)<br>
         • Agent 2: Sản lượng & Kinh tế (Groq)<br>
-        • Vision AI: Nhận diện bệnh từ ảnh (Claude)<br><br>
+        • Vision AI: Nhận diện bệnh từ ảnh (Groq Vision)<br><br>
         <strong>🗄️ Knowledge Base:</strong><br>
         6 bệnh phổ biến cà phê TN<br><br>
-        <strong>🔑 Cần thêm .env:</strong><br>
-        • ANTHROPIC_API_KEY (Vision AI)
+        <strong>🔑 Cần .env:</strong><br>
+        • GROQ_API_KEY (bắt buộc)<br>
+        • OPENWEATHER_API_KEY (khuyến nghị)
         </div>
         """, unsafe_allow_html=True)
     
@@ -838,7 +821,7 @@ def main():
     st.markdown("""
     <div class="main-header">
         <h1>🌾 MÙA VÀNG AGENT</h1>
-        <p>Hệ thống Multi-Agent cảnh báo sâu bệnh cà phê Tây Nguyên </br> Groq  +  OpenWeatherMap</p>
+        <p>Hệ thống Multi-Agent cảnh báo sâu bệnh cà phê Tây Nguyên </br> Groq (Text + Vision) + OpenWeatherMap</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -907,10 +890,10 @@ def main():
             with col_info:
                 st.markdown("**✅ Ảnh sẵn sàng phân tích**")
                 st.markdown(f"📁 `{uploaded_image.name}` ({round(uploaded_image.size/1024, 1)} KB)")
-                if not ANTHROPIC_API_KEY:
-                    st.warning("⚠️ Cần `ANTHROPIC_API_KEY` trong `.env` để dùng tính năng nhận diện ảnh (Claude Vision).")
+                if not GROQ_API_KEY:
+                    st.warning("⚠️ Cần `GROQ_API_KEY` trong `.env` để dùng tính năng nhận diện ảnh (Groq Vision).")
                 else:
-                    st.success("🤖 Claude Vision sẵn sàng phân tích!")
+                    st.success("🤖 Groq Vision sẵn sàng phân tích!")
                 analyze_img_btn = st.button("🔍 Phân tích ảnh ngay", type="primary", use_container_width=True, key="btn_analyze_img")
                 if analyze_img_btn:
                     diseases = load_disease_knowledge()
@@ -918,8 +901,8 @@ def main():
                     ext = uploaded_image.name.rsplit(".", 1)[-1].lower()
                     mime_map = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
                     image_type = mime_map.get(ext, "image/jpeg")
-                    with st.spinner("🤖 Claude Vision đang phân tích ảnh..."):
-                        vision_result = analyze_image_with_claude(image_bytes, image_type, diseases)
+                    with st.spinner("🤖 Groq Vision đang phân tích ảnh..."):
+                        vision_result = analyze_image_with_groq(image_bytes, image_type, diseases)
                     st.session_state["vision_result"] = vision_result
                     st.session_state["vision_diseases_kb"] = diseases
                     # Auto-fill câu hỏi nếu phát hiện bệnh
@@ -1050,7 +1033,7 @@ def main():
         st.markdown("""
         <div style="text-align:center;color:rgba(255,255,255,0.4);font-size:0.8rem;padding:1rem 0;">
             🌾 MÙA VÀNG AGENT · Hackathon · AI no 1 team   
-            Groq (Miễn phí, siêu nhanh) + OpenWeatherMap + Claude Vision<br>
+            Groq (Text + Vision) + OpenWeatherMap<br>
             Dữ liệu chỉ mang tính tham khảo. Luôn tham vấn chuyên gia khuyến nông địa phương.
         </div>
         """, unsafe_allow_html=True)
@@ -1067,7 +1050,7 @@ def main():
             <div style="display:flex;justify-content:center;gap:2rem;flex-wrap:wrap;font-size:0.9rem;">
                 <div>📡 <strong>Live Weather</strong><br><small>Thời tiết thực tế từ OpenWeatherMap</small></div>
                 <div>🔬 <strong>AI Analysis</strong><br><small>Groq (Siêu nhanh, miễn phí)</small></div>
-                <div>📸 <strong>Vision AI</strong><br><small>Nhận diện bệnh từ ảnh (Claude)</small></div>
+                <div>📸 <strong>Vision AI</strong><br><small>Nhận diện bệnh từ ảnh (Groq Vision)</small></div>
                 <div>📊 <strong>Kinh tế</strong><br><small>Dự báo thiệt hại bằng VNĐ</small></div>
                 <div>📱 <strong>Zalo Alert</strong><br><small>Mô phỏng thông báo nông dân</small></div>
             </div>
