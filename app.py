@@ -13,6 +13,10 @@ with st.sidebar:
     st.header("⚙️ Cấu Hình")
     location = st.selectbox("Chọn địa phương:", ["Gia Lai", "Bình Định"])
     st.markdown("---")
+    st.header("🔔 Nhận báo cáo qua Telegram")
+    telegram_id = st.text_input("Nhập Telegram Chat ID (để nhận báo cáo tự động)", value="")
+    st.caption("Có thể bỏ trống nếu không muốn nhận.")
+    st.markdown("---")
     st.caption("AI no 1 Group")
 
 st.subheader("📸 Chụp ảnh hoặc Tải ảnh cây trồng")
@@ -23,7 +27,6 @@ if not img_file:
 if img_file:
     st.image(img_file, caption="Ảnh nông sản đầu vào", width=300)
 
-    # ---- PHẦN THÊM MỚI: Nhập tên cây thủ công (dự phòng) ----
     with st.expander("✏️ Nhập tên cây trồng thủ công (nếu ảnh không rõ hoặc Vision lỗi)"):
         manual_crop = st.text_input("Tên cây trồng (ví dụ: cà phê, lúa, tiêu):")
         if manual_crop:
@@ -36,13 +39,14 @@ if img_file:
             image_bytes = img_file.getvalue()
             agent = CropDecisionAgent()
             
-            # Lấy tên thủ công nếu có, nếu không thì truyền None
             manual_crop_value = manual_crop.strip() if manual_crop else None
-            
+            telegram_id_value = telegram_id.strip() if telegram_id.strip() else None
+
             decision, execution_logs = agent.run_workflow(
-                image_bytes, 
+                image_bytes,
                 location=location,
-                manual_crop=manual_crop_value
+                manual_crop=manual_crop_value,
+                user_telegram_id=telegram_id_value   # thêm tham số này
             )
             
             st.success("✅ Quá trình vận hành của Agent:")
