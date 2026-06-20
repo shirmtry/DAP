@@ -41,12 +41,12 @@ if img_file:
             
             manual_crop_value = manual_crop.strip() if manual_crop else None
             telegram_id_value = telegram_id.strip() if telegram_id.strip() else None
-
+            
             decision, execution_logs = agent.run_workflow(
                 image_bytes,
                 location=location,
                 manual_crop=manual_crop_value,
-                user_telegram_id=telegram_id_value   # thêm tham số này
+                user_telegram_id=telegram_id_value
             )
             
             st.success("✅ Quá trình vận hành của Agent:")
