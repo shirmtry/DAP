@@ -1,14 +1,11 @@
+# Database
+*.db
+*.db-journal
+
+# Ảnh crop và student data
+backend/database/student_data/
+backend/database/cropped_faces/
+backend/database/descriptors.json
+
 # Node modules
 node_modules/
-
-# Biến môi trường
-.env
-
-# Logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Thư mục tạm
-tmp/
-temp/
