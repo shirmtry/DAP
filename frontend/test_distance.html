@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test nhận diện theo khoảng cách</title>
+    <style>
+        /* Giữ nguyên style */
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: #1a1a2e;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        h1 { color: #4caf50; margin-bottom: 10px; font-size: 24px; }
+        .subtitle { color: #aaa; margin-bottom: 20px; font-size: 14px; }
+        .container { display: flex; gap: 30px; flex-wrap: wrap; justify-content: center; width: 100%; max-width: 1200px; }
+        .video-wrapper {
+            position: relative;
+            background: #000;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 2px solid #333;
+            max-width: 800px;
+            flex: 1;
+        }
+        #video { width: 100%; height: auto; display: block; background: #000; }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .info-panel {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 20px;
+            min-width: 280px;
+            max-width: 400px;
+            flex: 1;
+            border: 1px solid #2a3a5c;
+        }
+        .info-panel h2 {
+            font-size: 16px;
+            color: #4caf50;
+            margin-bottom: 15px;
+            border-bottom: 1px solid #2a3a5c;
+            padding-bottom: 10px;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #1a2a4a;
+            font-size: 14px;
+        }
+        .info-row .label { color: #888; }
+        .info-row .value { color: #fff; font-weight: 600; }
+        .info-row .value.success { color: #4caf50; }
+        .info-row .value.warning { color: #ff9800; }
+        .info-row .value.danger { color: #f44336; }
+        .log-area {
+            margin-top: 15px;
+            background: #0d1b2a;
+            border-radius: 8px;
+            padding: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+            color: #aab;
+        }
+        .log-area .log-entry { padding: 3px 0; border-bottom: 1px solid #1a2a3a; line-height: 1.4; }
+        .log-area .log-entry .time { color: #666; }
+        .log-area .log-entry .pass { color: #4caf50; }
+        .log-area .log-entry .fail { color: #f44336; }
+        .log-area .log-entry .info { color: #64b5f6; }
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        .controls button {
+            padding: 10px 25px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .controls button:hover { transform: scale(1.05); }
+        .btn-start { background: #4caf50; color: #fff; }
+        .btn-start:hover { background: #388e3c; }
+        .btn-capture { background: #2196f3; color: #fff; }
+        .btn-capture:hover { background: #1976d2; }
+        .btn-clear { background: #ff5722; color: #fff; }
+        .btn-clear:hover { background: #d84315; }
+        .btn-status {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-block;
+            background: #333;
+            color: #aaa;
+        }
+        .btn-status.ready { background: #4caf50; color: #fff; }
+        .btn-status.loading { background: #ff9800; color: #fff; animation: blink 1s infinite; }
+        @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+        .note {
+            margin-top: 15px;
+            padding: 15px;
+            background: #1a2a3a;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #aab;
+            border-left: 3px solid #ff9800;
+            width: 100%;
+            max-width: 800px;
+        }
+        .note strong { color: #ff9800; }
+        .distance-badge {
+            display: inline-block;
+            padding: 2px 12px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .distance-badge.near { background: #4caf50; color: #fff; }
+        .distance-badge.medium { background: #ff9800; color: #fff; }
+        .distance-badge.far { background: #f44336; color: #fff; }
+        .distance-badge.veryfar { background: #9c27b0; color: #fff; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0d1b2a; }
+        ::-webkit-scrollbar-thumb { background: #2a3a5c; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3a4a6c; }
+        @media (max-width: 768px) {
+            .container { flex-direction: column; align-items: center; }
+            .info-panel { width: 100%; min-width: unset; }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>📐 Test Nhận Diện Theo Khoảng Cách</h1>
+    <p class="subtitle">Đứng ở các khoảng cách 1m, 2m, 3m, 5m để kiểm tra độ chính xác</p>
+
+    <div class="container">
+        <div class="video-wrapper">
+            <video id="video" autoplay muted playsinline></video>
+            <canvas id="overlay"></canvas>
+            <div style="position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);">
+                <span class="btn-status" id="statusBadge">⏳ Đang tải...</span>
+            </div>
+        </div>
+
+        <div class="info-panel">
+            <h2>📊 Thông số nhận diện</h2>
+            <div class="info-row">
+                <span class="label">👤 Tên học sinh</span>
+                <span class="value" id="studentName">--</span>
+            </div>
+            <div class="info-row">
+                <span class="label">📏 Khoảng cách ước lượng</span>
+                <span class="value" id="distanceDisplay">--</span>
+            </div>
+            <div class="info-row">
+                <span class="label">📐 Kích thước mặt (px)</span>
+                <span class="value" id="faceSizeDisplay">--</span>
+            </div>
+            <div class="info-row">
+                <span class="label">🎯 Độ khớp (match)</span>
+                <span class="value" id="matchScore">--</span>
+            </div>
+            <div class="info-row">
+                <span class="label">😊 Cảm xúc</span>
+                <span class="value" id="emotionDisplay">--</span>
+            </div>
+            <div class="info-row">
+                <span class="label">📊 Trạng thái</span>
+                <span class="value" id="statusDisplay">Chờ...</span>
+            </div>
+
+            <h2 style="margin-top: 20px;">📋 Lịch sử test</h2>
+            <div class="log-area" id="logArea">
+                <div class="log-entry" style="color: #666;">-- Chưa có dữ liệu --</div>
+            </div>
+
+            <div class="controls">
+                <button class="btn-start" onclick="startTest()">▶ Bắt đầu</button>
+                <button class="btn-capture" onclick="captureAndTest()">📸 Chụp & Test</button>
+                <button class="btn-clear" onclick="clearLog()">🗑️ Xóa log</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="note">
+        <strong>📌 Hướng dẫn:</strong>
+        <ul style="margin-top: 8px; padding-left: 20px; line-height: 1.6;">
+            <li><strong>Khoảng cách gần (&lt; 1.5m):</strong> Khuôn mặt &gt; 150px → Nhận diện <span style="color:#4caf50;">tốt</span></li>
+            <li><strong>Khoảng cách trung bình (1.5m - 3m):</strong> Khuôn mặt 80-150px → Nhận diện <span style="color:#ff9800;">trung bình</span></li>
+            <li><strong>Khoảng cách xa (3m - 5m):</strong> Khuôn mặt 40-80px → Nhận diện <span style="color:#f44336;">kém</span></li>
+            <li><strong>Khoảng cách rất xa (&gt; 5m):</strong> Khuôn mặt &lt; 40px → <span style="color:#9c27b0;">không nhận diện được</span></li>
+        </ul>
+    </div>
+
+    <!-- Load face-api.js từ server local (nếu có) -->
+    <script src="face-api.min.js" onerror="loadFromCDN()"></script>
+    <script>
+        // Fallback nếu không load được local
+        function loadFromCDN() {
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js';
+            script.crossOrigin = 'anonymous';
+            document.head.appendChild(script);
+        }
+
+        // ==================== CONFIG ====================
+        const SERVER_URL = window.location.origin;
+        const API_KEY = 'your-secret-key-change-me';
+        const DETECTOR_INPUT_SIZE = 512;
+
+        // ==================== DOM ====================
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const ctx = overlay.getContext('2d');
+        const statusBadge = document.getElementById('statusBadge');
+
+        const studentNameEl = document.getElementById('studentName');
+        const distanceDisplayEl = document.getElementById('distanceDisplay');
+        const faceSizeDisplayEl = document.getElementById('faceSizeDisplay');
+        const matchScoreEl = document.getElementById('matchScore');
+        const emotionDisplayEl = document.getElementById('emotionDisplay');
+        const statusDisplayEl = document.getElementById('statusDisplay');
+        const logArea = document.getElementById('logArea');
+
+        // ==================== STATE ====================
+        let isModelLoaded = false;
+        let isDetecting = false;
+        let frameCounter = 0;
+        const FRAME_SKIP = 3;
+        let logCount = 0;
+
+        // ==================== LOGGING ====================
+        function addLog(message, type = 'info') {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            const colorMap = { 'pass': '#4caf50', 'fail': '#f44336', 'info': '#64b5f6', 'warning': '#ff9800' };
+            const symbolMap = { 'pass': '✅', 'fail': '❌', 'info': 'ℹ️', 'warning': '⚠️' };
+            entry.innerHTML = `
+                <span class="time">[${timeStr}]</span>
+                <span style="color:${colorMap[type] || '#aaa'}">${symbolMap[type] || '•'}</span>
+                ${message}
+            `;
+            logArea.prepend(entry);
+            if (logArea.children.length > 50) logArea.removeChild(logArea.lastChild);
+            logCount++;
+        }
+
+        function clearLog() {
+            logArea.innerHTML = '<div class="log-entry" style="color: #666;">-- Đã xóa log --</div>';
+            logCount = 0;
+        }
+
+        // ==================== FETCH HELPER ====================
+        async function fetchWithAuth(url, options = {}) {
+            const headers = { 'Content-Type': 'application/json', 'x-api-key': API_KEY, ...(options.headers || {}) };
+            const response = await fetch(url, { ...options, headers });
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(`HTTP ${response.status}: ${text}`);
+            }
+            return response;
+        }
+
+        // ==================== TF.JS ====================
+        async function forceWebGLBackend() {
+            if (typeof faceapi === 'undefined' || !faceapi.tf) return;
+            try {
+                await faceapi.tf.setBackend('webgl');
+                await faceapi.tf.ready();
+                console.log('✅ TF.js backend:', faceapi.tf.getBackend());
+            } catch (e) {
+                console.warn('⚠️ WebGL backend failed:', e.message);
+            }
+        }
+
+        // ==================== LOAD MODELS ====================
+        async function loadModels() {
+            statusBadge.textContent = '⏳ Đang tải model...';
+            statusBadge.className = 'btn-status loading';
+            try {
+                await forceWebGLBackend();
+                // Dùng SSD Mobilenet để bắt mặt nhỏ hơn
+                await Promise.all([
+                    faceapi.nets.ssdMobilenetv1.loadFromUri('/models'),
+                    faceapi.nets.faceLandmark68Net.loadFromUri('/models'),
+                    faceapi.nets.faceRecognitionNet.loadFromUri('/models'),
+                    faceapi.nets.faceExpressionNet.loadFromUri('/models'),
+                    faceapi.nets.ageGenderNet.loadFromUri('/models'),
+                ]);
+                isModelLoaded = true;
+                statusBadge.textContent = '✅ Đã sẵn sàng';
+                statusBadge.className = 'btn-status ready';
+                addLog('Mô hình đã tải thành công (SSD Mobilenet)', 'pass');
+                await startVideo();
+            } catch (err) {
+                console.error(err);
+                statusBadge.textContent = '❌ Lỗi tải model';
+                statusBadge.className = 'btn-status';
+                addLog(`Lỗi tải model: ${err.message}`, 'fail');
+                // Thử lại với TinyFaceDetector nếu SSD thất bại
+                try {
+                    await faceapi.nets.tinyFaceDetector.loadFromUri('/models');
+                    isModelLoaded = true;
+                    statusBadge.textContent = '✅ Đã sẵn sàng (Tiny)';
+                    statusBadge.className = 'btn-status ready';
+                    addLog('Đã tải TinyFaceDetector (fallback)', 'warning');
+                    await startVideo();
+                } catch (e) {
+                    addLog(`Không thể tải bất kỳ detector nào: ${e.message}`, 'fail');
+                }
+            }
+        }
+
+        // ==================== START CAMERA ====================
+        async function startVideo() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'environment' }
+                });
+                video.srcObject = stream;
+                await video.play();
+                overlay.width = video.videoWidth || 1280;
+                overlay.height = video.videoHeight || 720;
+                addLog('📷 Camera đã bật', 'pass');
+                statusDisplayEl.textContent = '📷 Đang chạy';
+                statusDisplayEl.style.color = '#4caf50';
+                requestAnimationFrame(detectionLoop);
+            } catch (err) {
+                console.error(err);
+                addLog(`Lỗi mở camera: ${err.message}`, 'fail');
+                statusDisplayEl.textContent = '❌ Lỗi camera';
+                statusDisplayEl.style.color = '#f44336';
+            }
+        }
+
+        // ==================== PREPROCESS ====================
+        function preprocessImage(imageSource) {
+            const srcW = imageSource.videoWidth || imageSource.width || 1280;
+            const srcH = imageSource.videoHeight || imageSource.height || 720;
+            const maxWidth = 1024;
+            const scale = Math.min(1, maxWidth / srcW);
+            const outW = Math.round(srcW * scale);
+            const outH = Math.round(srcH * scale);
+            const canvas = document.createElement('canvas');
+            canvas.width = outW;
+            canvas.height = outH;
+            const c = canvas.getContext('2d', { willReadFrequently: false });
+            c.filter = 'brightness(1.1) contrast(1.3) saturate(1.1)';
+            c.drawImage(imageSource, 0, 0, outW, outH);
+            c.filter = 'none';
+            return { canvas, scale };
+        }
+
+        function cropFace(processedCanvas, box) {
+            const x = Math.max(0, box.x);
+            const y = Math.max(0, box.y);
+            const w = Math.min(box.width, processedCanvas.width - x);
+            const h = Math.min(box.height, processedCanvas.height - y);
+            const cropCanvas = document.createElement('canvas');
+            cropCanvas.width = w;
+            cropCanvas.height = h;
+            const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
+            cropCtx.drawImage(processedCanvas, x, y, w, h, 0, 0, w, h);
+            return cropCanvas.toDataURL('image/jpeg', 0.9);
+        }
+
+        // ==================== ESTIMATE DISTANCE ====================
+        function estimateDistance(faceWidthPx, faceHeightPx) {
+            const avgFaceSize = (faceWidthPx + faceHeightPx) / 2;
+            if (avgFaceSize < 20) return { distance: '> 7m', label: 'Rất xa', class: 'veryfar' };
+            if (avgFaceSize < 40) return { distance: '5m - 7m', label: 'Rất xa', class: 'veryfar' };
+            if (avgFaceSize < 60) return { distance: '3m - 5m', label: 'Xa', class: 'far' };
+            if (avgFaceSize < 90) return { distance: '2m - 3m', label: 'Trung bình', class: 'medium' };
+            if (avgFaceSize < 140) return { distance: '1.5m - 2m', label: 'Gần', class: 'near' };
+            if (avgFaceSize < 200) return { distance: '1m - 1.5m', label: 'Rất gần', class: 'near' };
+            return { distance: '< 1m', label: 'Rất gần', class: 'near' };
+        }
+
+        // ==================== DETECTION LOOP ====================
+        function detectionLoop() {
+            frameCounter++;
+            if (frameCounter % FRAME_SKIP === 0 && !isDetecting &&
+                !video.paused && !video.ended && video.readyState >= 2) {
+                isDetecting = true;
+                detectAndTest()
+                    .catch(err => console.error('detectAndTest error:', err))
+                    .finally(() => { isDetecting = false; });
+            }
+            requestAnimationFrame(detectionLoop);
+        }
+
+        // ==================== DETECT & TEST ====================
+        async function detectAndTest() {
+            if (!isModelLoaded) return;
+
+            const { canvas: processedCanvas, scale } = preprocessImage(video);
+            let detections;
+            try {
+                if (faceapi.nets.ssdMobilenetv1.isLoaded) {
+                    detections = await faceapi.detectAllFaces(processedCanvas, new faceapi.SsdMobilenetv1Options({
+                        minConfidence: 0.4,
+                        maxResults: 10,
+                        inputSize: DETECTOR_INPUT_SIZE
+                    }))
+                    .withFaceLandmarks()
+                    .withFaceDescriptors()
+                    .withFaceExpressions()
+                    .withAgeAndGender();
+                } else {
+                    // Fallback Tiny
+                    detections = await faceapi.detectAllFaces(processedCanvas, new faceapi.TinyFaceDetectorOptions({
+                        inputSize: 320,
+                        scoreThreshold: 0.5
+                    }))
+                    .withFaceLandmarks()
+                    .withFaceDescriptors()
+                    .withFaceExpressions()
+                    .withAgeAndGender();
+                }
+            } catch (e) {
+                console.warn('Detection error:', e);
+                return;
+            }
+
+            ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+            if (detections.length === 0) {
+                studentNameEl.textContent = '--';
+                faceSizeDisplayEl.textContent = '--';
+                distanceDisplayEl.textContent = '--';
+                matchScoreEl.textContent = '--';
+                emotionDisplayEl.textContent = '--';
+                statusDisplayEl.textContent = '🔍 Không tìm thấy khuôn mặt';
+                statusDisplayEl.style.color = '#ff9800';
+                return;
+            }
+
+            // Lấy khuôn mặt lớn nhất
+            const sorted = detections.sort((a, b) => {
+                const areaA = a.detection.box.width * a.detection.box.height;
+                const areaB = b.detection.box.width * b.detection.box.height;
+                return areaB - areaA;
+            });
+            const detection = sorted[0];
+            const box = detection.detection.box;
+
+            const realBox = {
+                x: box.x / scale,
+                y: box.y / scale,
+                width: box.width / scale,
+                height: box.height / scale
+            };
+
+            // Vẽ bounding box
+            ctx.strokeStyle = '#4caf50';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(realBox.x, realBox.y, realBox.width, realBox.height);
+
+            const faceSize = Math.round((realBox.width + realBox.height) / 2);
+            faceSizeDisplayEl.textContent = `${faceSize}px`;
+
+            const distanceInfo = estimateDistance(realBox.width, realBox.height);
+            distanceDisplayEl.textContent = distanceInfo.distance;
+            const badgeClass = `distance-badge ${distanceInfo.class}`;
+            distanceDisplayEl.className = `value ${badgeClass}`;
+
+            let statusText = '';
+            let statusColor = '';
+            if (faceSize > 150) { statusText = '✅ Tốt (gần)'; statusColor = '#4caf50'; }
+            else if (faceSize > 80) { statusText = '⚠️ Trung bình'; statusColor = '#ff9800'; }
+            else if (faceSize > 40) { statusText = '❌ Kém (xa)'; statusColor = '#f44336'; }
+            else { statusText = '🚫 Rất kém (quá xa)'; statusColor = '#9c27b0'; }
+            statusDisplayEl.textContent = statusText;
+            statusDisplayEl.style.color = statusColor;
+
+            // Vẽ overlay
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillRect(realBox.x, realBox.y - 30, realBox.width, 28);
+            ctx.fillStyle = '#fff';
+            ctx.font = '14px Arial';
+            ctx.fillText(`${faceSize}px - ${distanceInfo.label}`, realBox.x + 5, realBox.y - 8);
+
+            // Emotion
+            const expressions = detection.expressions;
+            let dominant = 'neutral';
+            if (expressions) {
+                let maxScore = 0;
+                for (const [key, val] of Object.entries(expressions)) {
+                    if (val > maxScore) { maxScore = val; dominant = key; }
+                }
+                const emojiMap = {
+                    'neutral': '😐', 'happy': '😊', 'sad': '😢',
+                    'angry': '😠', 'fearful': '😨', 'disgusted': '🤢', 'surprised': '😮'
+                };
+                emotionDisplayEl.textContent = `${emojiMap[dominant] || '😐'} ${dominant}`;
+            }
+
+            // Gửi lên server
+            try {
+                const croppedImg = cropFace(processedCanvas, box);
+                const descriptor = Array.from(detection.descriptor);
+
+                const response = await fetchWithAuth(`${SERVER_URL}/api/recognize-multiple`, {
+                    method: 'POST',
+                    body: JSON.stringify({
+                        descriptors: [descriptor],
+                        emotions: [dominant],
+                        croppedImages: [croppedImg],
+                        ageGenders: [{
+                            age: detection.age ? Math.round(detection.age) : null,
+                            gender: detection.gender || null
+                        }]
+                    })
+                });
+                const data = await response.json();
+
+                if (data.success && data.results && data.results.length > 0) {
+                    const result = data.results[0];
+                    if (result.studentId) {
+                        studentNameEl.textContent = `✅ ${result.studentName}`;
+                        studentNameEl.style.color = '#4caf50';
+                        const matchPct = (1 - result.distance) * 100;
+                        matchScoreEl.textContent = `${Math.round(matchPct)}%`;
+                        matchScoreEl.style.color = matchPct > 60 ? '#4caf50' : matchPct > 40 ? '#ff9800' : '#f44336';
+
+                        const logMsg =
+                            `🎯 ${result.studentName} (${result.studentId}) | Face: ${faceSize}px | Match: ${Math.round(matchPct)}% | Distance: ${distanceInfo.distance}`;
+                        addLog(logMsg, matchPct > 50 ? 'pass' : 'warning');
+                    } else {
+                        studentNameEl.textContent = '❓ Không xác định';
+                        studentNameEl.style.color = '#ff9800';
+                        matchScoreEl.textContent = '0%';
+                        matchScoreEl.style.color = '#f44336';
+                        addLog(`❓ Không nhận diện được | Face: ${faceSize}px | Distance: ${distanceInfo.distance}`, 'fail');
+                    }
+                } else {
+                    studentNameEl.textContent = '❌ Lỗi server';
+                    studentNameEl.style.color = '#f44336';
+                    addLog(`❌ Lỗi server: ${JSON.stringify(data)}`, 'fail');
+                }
+            } catch (err) {
+                console.error('Error sending to server:', err);
+                studentNameEl.textContent = '❌ Lỗi kết nối';
+                studentNameEl.style.color = '#f44336';
+                matchScoreEl.textContent = '--';
+                addLog(`❌ Lỗi kết nối server: ${err.message}`, 'fail');
+            }
+        }
+
+        // ==================== CAPTURE MANUALLY ====================
+        async function captureAndTest() {
+            if (!isModelLoaded) { addLog('⏳ Đợi model tải xong!', 'warning'); return; }
+            addLog('📸 Đang chụp và test...', 'info');
+            await detectAndTest();
+        }
+
+        // ==================== START TEST ====================
+        function startTest() {
+            if (isModelLoaded) {
+                addLog('▶️ Bắt đầu test, hãy di chuyển đến các khoảng cách khác nhau', 'info');
+                statusDisplayEl.textContent = '🔴 Đang test...';
+                statusDisplayEl.style.color = '#4caf50';
+            } else {
+                loadModels();
+            }
+        }
+
+        // ==================== INIT ====================
+        window.onload = function() {
+            addLog('🚀 Đang khởi tạo...', 'info');
+            // Kiểm tra nếu face-api đã load sẵn
+            if (typeof faceapi !== 'undefined') {
+                loadModels();
+            } else {
+                // Chờ script load
+                const checkInterval = setInterval(() => {
+                    if (typeof faceapi !== 'undefined') {
+                        clearInterval(checkInterval);
+                        loadModels();
+                    }
+                }, 500);
+                // Timeout fallback
+                setTimeout(() => {
+                    clearInterval(checkInterval);
+                    if (!isModelLoaded) {
+                        addLog('❌ Không thể load face-api.js, kiểm tra kết nối mạng', 'fail');
+                    }
+                }, 15000);
+            }
+        };
+    </script>
+</body>
+</html>

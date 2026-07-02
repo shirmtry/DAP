@@ -1,0 +1,93 @@
+{
+  "timestamp": "2026-07-02T22:14:45.004814",
+  "total_tests": 12,
+  "passed": 12,
+  "failed": 0,
+  "duration": 6.938847541809082,
+  "results": [
+    {
+      "test": "Health check",
+      "passed": true,
+      "message": "Server OK, uptime=2.9s, cache=10",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:38.090862"
+    },
+    {
+      "test": "Get students",
+      "passed": true,
+      "message": "Lấy thành công 10 học sinh",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:38.105250"
+    },
+    {
+      "test": "Register student",
+      "passed": true,
+      "message": "Đã đăng ký Nguyễn Văn Test",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:38.174616"
+    },
+    {
+      "test": "Recognize",
+      "passed": true,
+      "message": "Nhận diện 1 khuôn mặt, kết quả: 1",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:38.221970"
+    },
+    {
+      "test": "Get attendance",
+      "passed": true,
+      "message": "Điểm danh hôm nay: 3 học sinh",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:38.247361"
+    },
+    {
+      "test": "Behavior alert",
+      "passed": true,
+      "message": "Gửi cảnh báo thành công",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:39.068505"
+    },
+    {
+      "test": "Get stats",
+      "passed": true,
+      "message": "Tổng học sinh: 11, Có mặt hôm nay: 3",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:39.094950"
+    },
+    {
+      "test": "Report CSV",
+      "passed": true,
+      "message": "Tải CSV thành công (dòng đầu: ﻿Mã số,Họ tên,Trạng thái,Ngày\nQE200009,Dương Thị M...)",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:39.117258"
+    },
+    {
+      "test": "WebSocket",
+      "passed": true,
+      "message": "Kết nối thành công nhưng chưa nhận được tin nhắn (có thể do không có sự kiện)",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:44.903258"
+    },
+    {
+      "test": "Emotion stats",
+      "passed": true,
+      "message": "Lấy 1 bản ghi cảm xúc cho học sinh TEST001",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:44.911450"
+    },
+    {
+      "test": "Class emotion",
+      "passed": true,
+      "message": "Lấy thống kê cảm xúc lớp: 4 loại",
+      "response_time": null,
+      "timestamp": "2026-07-02T22:14:44.935531"
+    },
+    {
+      "test": "Performance",
+      "passed": true,
+      "message": "Trung bình thời gian phản hồi: 17.3ms",
+      "response_time": 0.017320573329925537,
+      "timestamp": "2026-07-02T22:14:45.004814"
+    }
+  ]
+}

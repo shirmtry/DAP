@@ -1,18 +1,23 @@
 // frontend/script.js
 // ===================================================================
-// COMPLETE VERSION WITH:
+// ENHANCED VERSION WITH:
 // - Face recognition (TinyFaceDetector, 68 landmarks, expressions, age/gender)
 // - Multiple descriptors per student (self-learning via server)
 // - Telegram photo notification on attendance
-// - Cloth color analysis (HSV histogram)
-// - Accessory detection (glasses, mask, hat)
-// - Behavior detection using face landmarks + MediaPipe Hands
-// - Attention timer (alert after 10 minutes of inattention)
-// - Anti-spoofing (blink detection via EAR)
+// - Cloth color analysis (HSV histogram) - THROTTLED + SMOOTHED
+// - Accessory detection (glasses, mask, hat) - THROTTLED
+// - Behavior detection using face landmarks (drowsiness, distraction)
+// - MediaPipe Hands fallback (if blocked, skip hand detection)
 // - IndexedDB caching of student list
+// - Dynamic SERVER_URL using window.location.origin
+// - SMOOTHED emotion + cloth color (no jumping)
+// - REMOVED spoof/blink warnings
+// - IMPROVED: detection accuracy, camera reconnect, confidence score
+// - ALIGNED with new backend (db.js + server.js)
 // ===================================================================
 
-const SERVER_URL = 'http://localhost:5000';
+// Use dynamic server URL (works on any host/port)
+const SERVER_URL = window.location.origin;
 const MODEL_URL = '/models';
 const API_KEY = 'your-secret-key-change-me';
 
@@ -23,6 +28,7 @@ const ctx = overlay.getContext('2d', { willReadFrequently: true });
 const statusEl = document.getElementById('status');
 const attendanceList = document.getElementById('attendance-list');
 const behaviorLog = document.getElementById('behavior-log');
+const loadingIndicator = document.getElementById('loading-indicator') || null;
 
 const modal = document.getElementById('registerModal');
 const closeBtn = document.querySelector('.close');
@@ -34,24 +40,34 @@ const previewImage = document.getElementById('previewImage');
 const registerStatus = document.getElementById('registerStatus');
 const submitRegister = document.getElementById('submitRegister');
 
-// CONFIGURATION
-const DETECTOR_INPUT_SIZE = 320;
-const DETECTOR_SCORE_THRESHOLD = 0.5;
-const DETECTION_MAX_WIDTH = 640;
-const FRAME_SKIP = 10;
-const SUBTASK_EVERY_N_CYCLES = 3;
-const CROP_EVERY_N_CYCLES = 2;
-const STUDENT_LIST_REFRESH_INTERVAL = 30000;
+// ==================== CONFIGURATION ====================
+const CONFIG = {
+    DETECTOR_INPUT_SIZE: 512, // tăng từ 320 lên 512 để cải thiện độ chính xác
+    DETECTOR_SCORE_THRESHOLD: 0.5,
+    DETECTION_MAX_WIDTH: 640,
+    FRAME_SKIP: 8, // giảm từ 10 để tăng tốc độ phản hồi (vẫn đảm bảo hiệu năng)
+    SUBTASK_EVERY_N_CYCLES: 3,
+    CROP_EVERY_N_CYCLES: 2,
+    STUDENT_LIST_REFRESH_INTERVAL: 30000,
+    SMOOTHING_WINDOW_MS: 3000,
+    HANDS_FRAME_SKIP: 6, // chạy hand detection ít thường xuyên hơn
+    MAX_DESCRIPTORS_PER_REQUEST: 20,
+};
 
-// STATE
+// ==================== STATE ====================
 let isModelLoaded = false;
 let isDetecting = false;
 let frameCounter = 0;
 let cycleCount = 0;
+let handFrameCounter = 0;
 let autoRegisterDone = false;
 let studentList = [];
 let lastStudentListUpdate = 0;
-let attendanceSentToday = new Set(); // để tránh gửi nhiều lần
+let attendanceSentToday = new Set();
+let cameraActive = false;
+
+// Smoothed state per student
+const studentState = {};
 
 const negativeEmotionCount = {};
 const NEGATIVE_EMOTION_THRESHOLD = 5;
@@ -67,8 +83,15 @@ if (typeof faceapi === 'undefined') {
 
 // ==================== HELPER: fetchWithAuth ====================
 async function fetchWithAuth(url, options = {}) {
-    const headers = { 'Content-Type': 'application/json', 'x-api-key': API_KEY, ...(options.headers || {}) };
+    const headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        ...(options.headers || {})
+    };
     const response = await fetch(url, { ...options, headers });
+    if (response.status === 429) {
+        throw new Error('Rate limit exceeded. Vui lòng thử lại sau.');
+    }
     if (!response.ok) {
         const text = await response.text();
         throw new Error(`HTTP ${response.status}: ${text}`);
@@ -142,7 +165,7 @@ async function loadModels() {
         await updateStudentList(true);
         await autoRegisterFromSamples();
         await startVideo();
-        await loadMediaPipeModels(); // Tải MediaPipe Hands cho behavior detection
+        await loadMediaPipeModels();
     } catch (err) {
         console.error(err);
         statusEl.textContent = '❌ Lỗi tải model';
@@ -152,16 +175,14 @@ async function loadModels() {
 }
 
 // ==================== INDEXEDDB HELPER ====================
-// Import từ file riêng (sẽ tạo sau)
 import { getStudentsFromCache, saveStudentsToCache } from './indexeddb-helper.js';
 
-// ==================== STUDENT LIST (with IndexedDB) ====================
+// ==================== STUDENT LIST ====================
 async function updateStudentList(force = false) {
     const now = Date.now();
-    if (!force && (now - lastStudentListUpdate) < STUDENT_LIST_REFRESH_INTERVAL) return;
+    if (!force && (now - lastStudentListUpdate) < CONFIG.STUDENT_LIST_REFRESH_INTERVAL) return;
     lastStudentListUpdate = now;
 
-    // Thử cache trước
     if (!force) {
         const cached = await getStudentsFromCache();
         if (cached && cached.length > 0) {
@@ -173,6 +194,7 @@ async function updateStudentList(force = false) {
 
     try {
         const res = await fetch(`${SERVER_URL}/api/students`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         studentList = data;
         await saveStudentsToCache(data);
@@ -201,6 +223,7 @@ async function startVideo() {
         });
         video.srcObject = stream;
         await video.play();
+        cameraActive = true;
         console.log('📷 Camera started');
         overlay.width = video.videoWidth || 1280;
         overlay.height = video.videoHeight || 720;
@@ -213,13 +236,27 @@ async function startVideo() {
         statusEl.textContent = '❌ Không thể mở camera';
         statusEl.style.background = '#ffebee';
         statusEl.style.color = '#c62828';
+        cameraActive = false;
+        // Thử reconnect sau 5 giây
+        setTimeout(startVideo, 5000);
     }
 }
 
+// Hàm reconnect camera khi mất kết nối
+video.addEventListener('error', async (e) => {
+    console.warn('Camera lost, reconnecting...');
+    cameraActive = false;
+    if (video.srcObject) {
+        video.srcObject.getTracks().forEach(track => track.stop());
+        video.srcObject = null;
+    }
+    setTimeout(startVideo, 3000);
+});
+
 function detectionLoop() {
     frameCounter++;
-    if (frameCounter % FRAME_SKIP === 0 && !isDetecting &&
-        !video.paused && !video.ended && video.readyState >= 2) {
+    if (frameCounter % CONFIG.FRAME_SKIP === 0 && !isDetecting &&
+        !video.paused && !video.ended && video.readyState >= 2 && cameraActive) {
         isDetecting = true;
         detectAndRecognize()
             .catch(err => console.error('detectAndRecognize error:', err))
@@ -232,14 +269,15 @@ function detectionLoop() {
 function preprocessImage(imageSource) {
     const srcW = imageSource.videoWidth || imageSource.width || 1280;
     const srcH = imageSource.videoHeight || imageSource.height || 720;
-    const scale = Math.min(1, DETECTION_MAX_WIDTH / srcW);
+    const scale = Math.min(1, CONFIG.DETECTION_MAX_WIDTH / srcW);
     const outW = Math.round(srcW * scale);
     const outH = Math.round(srcH * scale);
     const canvas = document.createElement('canvas');
     canvas.width = outW;
     canvas.height = outH;
     const c = canvas.getContext('2d', { willReadFrequently: false });
-    c.filter = 'brightness(1.08) contrast(1.2)';
+    // Tăng cường chất lượng ảnh: sáng, tương phản, sharpen nhẹ
+    c.filter = 'brightness(1.1) contrast(1.3)';
     c.drawImage(imageSource, 0, 0, outW, outH);
     c.filter = 'none';
     return { canvas, scale };
@@ -258,7 +296,7 @@ function cropFace(processedCanvas, box) {
     return cropCanvas.toDataURL('image/jpeg', 0.85);
 }
 
-// ==================== CLOTH COLOR ANALYSIS (HSV) ====================
+// ==================== CLOTH COLOR ANALYSIS (HSV) - THROTTLED + SMOOTHED ====================
 function rgbToHsv(r, g, b) {
     r /= 255; g /= 255; b /= 255;
     const max = Math.max(r, g, b), min = Math.min(r, g, b);
@@ -297,7 +335,6 @@ async function analyzeClothColor(fullImageDataUrl, faceBox) {
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             const w = img.width, h = img.height;
-            // Lấy vùng thân trên: từ dưới cằm đến vai (ước lượng)
             const yStart = Math.floor(faceBox.y + faceBox.height * 0.6);
             const yEnd = Math.min(h, Math.floor(faceBox.y + faceBox.height * 1.8));
             const xStart = Math.max(0, faceBox.x - faceBox.width * 0.2);
@@ -308,13 +345,12 @@ async function analyzeClothColor(fullImageDataUrl, faceBox) {
             ctx.drawImage(img, xStart, yStart, cropW, cropH, 0, 0, cropW, cropH);
             const imageData = ctx.getImageData(0, 0, cropW, cropH);
             const data = imageData.data;
-            // Histogram 2D: Hue (10 bins) * Saturation (5 bins)
             const hist = new Array(10 * 5).fill(0);
             let totalPixels = 0;
             for (let i = 0; i < data.length; i += 4) {
                 const [r, g, b] = [data[i], data[i+1], data[i+2]];
                 const hsv = rgbToHsv(r, g, b);
-                if (hsv.s < 15 || hsv.v < 20) continue; // bỏ qua nhiễu
+                if (hsv.s < 15 || hsv.v < 20) continue;
                 const hBin = Math.floor(hsv.h / 36);
                 const sBin = Math.floor(hsv.s / 20);
                 if (hBin >= 0 && hBin < 10 && sBin >= 0 && sBin < 5) {
@@ -335,32 +371,27 @@ async function analyzeClothColor(fullImageDataUrl, faceBox) {
     });
 }
 
-// ==================== ACCESSORY DETECTION ====================
+// ==================== ACCESSORY DETECTION - THROTTLED ====================
 function detectAccessories(landmarks, faceBox) {
-    // landmarks là object FaceLandmarks68 có thuộc tính positions (mảng 68 điểm)
     if (!landmarks || !landmarks.positions) {
         return { hasMask: false, hasGlasses: false, hasHat: false };
     }
-    const pts = landmarks.positions; // mảng các {x, y}
-
+    const pts = landmarks.positions;
     const result = { hasMask: false, hasGlasses: false, hasHat: false };
 
-    // 1. Mask: khoảng cách môi / khoảng cách mắt
     const upperLip = pts[51];
     const lowerLip = pts[57];
     const mouthDist = Math.hypot(upperLip.x - lowerLip.x, upperLip.y - lowerLip.y);
     const eyeDist = Math.hypot(pts[36].x - pts[45].x, pts[36].y - pts[45].y);
     if (mouthDist / eyeDist < 0.25) result.hasMask = true;
 
-    // 2. Glasses: kiểm tra độ tương phản vùng mắt (đơn giản: khoảng cách lông mày - mắt)
     const leftEye = pts[36];
     const rightEye = pts[45];
-    const brow = pts[21]; // lông mày trái
+    const brow = pts[21];
     const browDist = Math.hypot(brow.x - leftEye.x, brow.y - leftEye.y);
     const faceHeight = Math.abs(pts[8].y - pts[27].y);
     if (browDist / faceHeight < 0.08) result.hasGlasses = true;
 
-    // 3. Hat: kiểm tra đỉnh đầu (landmark 8) so với bounding box
     const topLandmark = pts[8];
     const topBox = faceBox.top;
     if (Math.abs(topLandmark.y - topBox) / faceBox.height < 0.05) result.hasHat = true;
@@ -368,15 +399,13 @@ function detectAccessories(landmarks, faceBox) {
     return result;
 }
 
-// ==================== BEHAVIOR DETECTION (Face + Hands) ====================
-// MediaPipe Hands
+// ==================== BEHAVIOR DETECTION ====================
 let handsModel = null;
 let handsInitialized = false;
 
 async function loadMediaPipeModels() {
     if (handsInitialized) return;
     try {
-        // Tải thư viện từ CDN (nếu chưa có)
         if (typeof Hands === 'undefined') {
             await new Promise((resolve, reject) => {
                 const script = document.createElement('script');
@@ -400,10 +429,17 @@ async function loadMediaPipeModels() {
     } catch (err) {
         console.warn('⚠️ Không tải được MediaPipe Hands (có thể bị Tracking Prevention chặn), sẽ bỏ qua phát hiện giơ tay/che mặt:', err.message);
         handsInitialized = false;
+        statusEl.textContent = '⚠️ MediaPipe Hands không khả dụng (chặn tracking)';
+        statusEl.style.background = '#fff3e0';
+        statusEl.style.color = '#e65100';
+        setTimeout(() => {
+            statusEl.textContent = '✅ Sẵn sàng (không có hand detection)';
+            statusEl.style.background = '#e8f5e9';
+            statusEl.style.color = '#2e7d32';
+        }, 3000);
     }
 }
 
-// Attention tracker state
 const attentionTracker = {
     isDrowsy: false,
     isDistracted: false,
@@ -416,7 +452,6 @@ const attentionTracker = {
     lastAlertTime: 0
 };
 
-// EAR (Eye Aspect Ratio) for blink detection
 function calculateEAR(landmarks) {
     if (!landmarks || !landmarks.positions) return 0;
     const pts = landmarks.positions;
@@ -431,7 +466,6 @@ function calculateEAR(landmarks) {
     return (ear(leftEye) + ear(rightEye)) / 2;
 }
 
-// Head pose estimation (pitch, yaw) from 68 landmarks
 function getHeadOrientation(landmarks) {
     if (!landmarks || !landmarks.positions) {
         return { pitch: 0, yawRatio: 1 };
@@ -440,11 +474,9 @@ function getHeadOrientation(landmarks) {
     const nose = pts[30];
     const leftEyeAvg = pts[36];
     const rightEyeAvg = pts[45];
-    // Pitch: angle between eyes line and nose
     const eyeCenterX = (leftEyeAvg.x + rightEyeAvg.x) / 2;
     const eyeCenterY = (leftEyeAvg.y + rightEyeAvg.y) / 2;
     const pitch = Math.atan2(nose.y - eyeCenterY, nose.x - eyeCenterX) * 180 / Math.PI;
-    // Yaw: ratio of distances from nose to eyes
     const leftDist = Math.hypot(nose.x - leftEyeAvg.x, nose.y - leftEyeAvg.y);
     const rightDist = Math.hypot(nose.x - rightEyeAvg.x, nose.y - rightEyeAvg.y);
     const yawRatio = leftDist / rightDist;
@@ -452,9 +484,10 @@ function getHeadOrientation(landmarks) {
 }
 
 async function detectBehavior(faceLandmarks, faceBox, studentId, studentName) {
-    // 1. Drowsiness (head down + low EAR) — cảnh báo sau khi kéo dài > 1.5s
     const { pitch, yawRatio } = getHeadOrientation(faceLandmarks);
     const ear = calculateEAR(faceLandmarks);
+
+    // Drowsiness
     const isDrowsy = (pitch > 20 && ear < 0.25);
     if (isDrowsy) {
         if (!attentionTracker.isDrowsy) {
@@ -464,14 +497,14 @@ async function detectBehavior(faceLandmarks, faceBox, studentId, studentName) {
         const duration = (Date.now() - attentionTracker.drowsyStart) / 1000;
         if (duration > 1.5) {
             await sendBehaviorAlert(studentId, 'Buồn ngủ / cúi đầu lâu');
-            attentionTracker.drowsyStart = Date.now(); // reset để tránh spam liên tục
+            attentionTracker.drowsyStart = Date.now();
         }
     } else {
         attentionTracker.isDrowsy = false;
         attentionTracker.drowsyStart = null;
     }
 
-    // 2. Distracted (looking sideways) — cảnh báo sau khi kéo dài > 2s
+    // Distracted
     const isDistracted = (yawRatio < 0.6 || yawRatio > 1.4);
     if (isDistracted) {
         if (!attentionTracker.isDistracted) {
@@ -488,8 +521,11 @@ async function detectBehavior(faceLandmarks, faceBox, studentId, studentName) {
         attentionTracker.distractedStart = null;
     }
 
-    // 3. Face covered / Hand raising using MediaPipe Hands
+    // Hand detection only if MediaPipe initialized and frame count allows
     if (!handsInitialized || !handsModel) return;
+    handFrameCounter++;
+    if (handFrameCounter % CONFIG.HANDS_FRAME_SKIP !== 0) return;
+
     try {
         const handsResult = await new Promise((resolve) => {
             handsModel.onResults((results) => resolve(results));
@@ -498,19 +534,16 @@ async function detectBehavior(faceLandmarks, faceBox, studentId, studentName) {
         if (handsResult && handsResult.multiHandLandmarks && handsResult.multiHandLandmarks.length > 0) {
             const hand = handsResult.multiHandLandmarks[0];
             const wrist = hand[0];
-            // Face center
             const faceCenter = {
                 x: faceBox.x + faceBox.width/2,
                 y: faceBox.y + faceBox.height/2
             };
-            // Check covering: wrist near face center
             const distToFace = Math.hypot(wrist.x - faceCenter.x, wrist.y - faceCenter.y);
             const faceSize = Math.max(faceBox.width, faceBox.height);
             if (distToFace < faceSize * 0.2) {
                 await sendBehaviorAlert(studentId, 'Che mặt');
             }
 
-            // Hand raised: wrist above the top of the face box, persisted > 1s
             const indexTip = hand[8];
             const pinkyTip = hand[20];
             const spread = Math.hypot(indexTip.x - pinkyTip.x, indexTip.y - pinkyTip.y);
@@ -535,11 +568,10 @@ async function detectBehavior(faceLandmarks, faceBox, studentId, studentName) {
             attentionTracker.handRaisedStart = null;
         }
     } catch (err) {
-        // hands may not be ready
+        // ignore
     }
 }
 
-// Hàm gửi alert (đã có)
 async function sendBehaviorAlert(studentId, behavior) {
     try {
         const response = await fetchWithAuth(`${SERVER_URL}/api/behavior`, {
@@ -561,23 +593,28 @@ async function sendBehaviorAlert(studentId, behavior) {
 }
 
 // ==================== FACE DETECTION & RECOGNITION ====================
-let lastBlinkTime = 0;
-let blinkCount = 0;
-let blinkWarningShown = false;
-const BLINK_THRESHOLD = 0.22;
-const MIN_BLINK_INTERVAL = 150;
-const NO_BLINK_WARNING_MS = 10000; // tăng từ 5s lên 10s để giảm cảnh báo giả
+// Helper: smoothed value
+function getSmoothedState(studentId, key, newValue, timestamp) {
+    if (!studentState[studentId]) {
+        studentState[studentId] = {};
+    }
+    const state = studentState[studentId];
+    if (!state[key] || (timestamp - state[key].timestamp) > CONFIG.SMOOTHING_WINDOW_MS) {
+        state[key] = { value: newValue, timestamp: timestamp };
+    }
+    return state[key].value;
+}
 
 async function detectAndRecognize() {
     if (!isModelLoaded) return;
     cycleCount++;
-    const runSubtasks = (cycleCount % SUBTASK_EVERY_N_CYCLES === 0);
-    const runCrop = (cycleCount % CROP_EVERY_N_CYCLES === 0);
+    const runSubtasks = (cycleCount % CONFIG.SUBTASK_EVERY_N_CYCLES === 0);
+    const runCrop = (cycleCount % CONFIG.CROP_EVERY_N_CYCLES === 0);
 
     const { canvas: processedCanvas, scale } = preprocessImage(video);
     let query = faceapi.detectAllFaces(processedCanvas, new faceapi.TinyFaceDetectorOptions({
-        inputSize: DETECTOR_INPUT_SIZE,
-        scoreThreshold: DETECTOR_SCORE_THRESHOLD
+        inputSize: CONFIG.DETECTOR_INPUT_SIZE,
+        scoreThreshold: CONFIG.DETECTOR_SCORE_THRESHOLD
     })).withFaceLandmarks().withFaceDescriptors();
 
     if (runSubtasks) query = query.withFaceExpressions().withAgeAndGender();
@@ -598,7 +635,10 @@ async function detectAndRecognize() {
         return;
     }
 
-    const scaledBoxes = validDetections.map(d => ({
+    // Giới hạn số lượng khuôn mặt gửi lên server (tối đa 20)
+    const limitedDetections = validDetections.slice(0, CONFIG.MAX_DESCRIPTORS_PER_REQUEST);
+
+    const scaledBoxes = limitedDetections.map(d => ({
         x: d.detection.box.x / scale,
         y: d.detection.box.y / scale,
         width: d.detection.box.width / scale,
@@ -609,8 +649,8 @@ async function detectAndRecognize() {
     ctx.lineWidth = 2;
     scaledBoxes.forEach(b => ctx.strokeRect(b.x, b.y, b.width, b.height));
 
-    const descriptors = validDetections.map(d => Array.from(d.descriptor));
-    const emotions = validDetections.map(d => {
+    const descriptors = limitedDetections.map(d => Array.from(d.descriptor));
+    const emotions = limitedDetections.map(d => {
         if (!runSubtasks || !d.expressions) return null;
         const exp = d.expressions;
         let maxScore = 0, dominant = 'neutral';
@@ -620,8 +660,8 @@ async function detectAndRecognize() {
         return dominant;
     });
 
-    // Crop images for Telegram and cloth analysis
-    const croppedImages = validDetections.map((d, i) => {
+    // Crop images for Telegram
+    const croppedImages = limitedDetections.map((d, i) => {
         if (!runCrop) return null;
         const fullResCanvas = document.createElement('canvas');
         fullResCanvas.width = video.videoWidth;
@@ -631,23 +671,28 @@ async function detectAndRecognize() {
         return cropFace(fullResCanvas, scaledBoxes[i]);
     });
 
-    const ageGenders = validDetections.map(d => runSubtasks
+    const ageGenders = limitedDetections.map(d => runSubtasks
         ? { age: d.age ? Math.round(d.age) : null, gender: d.gender || null }
         : { age: null, gender: null }
     );
 
-    // Cloth colors & accessories
-    const clothColors = [];
-    const accessories = [];
-    const fullFrameDataUrl = captureFrameFromVideo(video); // dùng cho phân tích màu áo
+    // --- Cloth & Accessory: ONLY when runSubtasks is true (throttled) ---
+    let clothColors = [];
+    let accessories = [];
+    let fullFrameDataUrl = null;
 
-    for (let i = 0; i < validDetections.length; i++) {
-        const box = scaledBoxes[i];
-        const cloth = await analyzeClothColor(fullFrameDataUrl, box);
-        clothColors.push(cloth.color);
-
-        const acc = detectAccessories(validDetections[i].landmarks, box);
-        accessories.push(acc);
+    if (runSubtasks) {
+        fullFrameDataUrl = captureFrameFromVideo(video);
+        for (let i = 0; i < limitedDetections.length; i++) {
+            const box = scaledBoxes[i];
+            const cloth = await analyzeClothColor(fullFrameDataUrl, box);
+            clothColors.push(cloth.color);
+            const acc = detectAccessories(limitedDetections[i].landmarks, box);
+            accessories.push(acc);
+        }
+    } else {
+        clothColors = limitedDetections.map(() => '...');
+        accessories = limitedDetections.map(() => ({ hasMask: false, hasGlasses: false, hasHat: false }));
     }
 
     try {
@@ -664,16 +709,25 @@ async function detectAndRecognize() {
         });
         const data = await response.json();
         if (data.success) {
+            const now = Date.now();
             for (let idx = 0; idx < data.results.length; idx++) {
                 const result = data.results[idx];
                 const box = scaledBoxes[idx];
                 const ag = ageGenders[idx] || {};
                 const croppedImg = croppedImages[idx];
-                const cloth = clothColors[idx];
-                const acc = accessories[idx];
+                const rawCloth = clothColors[idx] || 'unknown';
+                const acc = accessories[idx] || { hasMask: false, hasGlasses: false, hasHat: false };
 
                 if (result.studentId) {
-                    // --- Vẽ thông tin ---
+                    const studentId = result.studentId;
+
+                    // --- SMOOTHED EMOTION ---
+                    const rawEmotion = result.emotion || 'neutral';
+                    const smoothedEmotion = getSmoothedState(studentId, 'emotion', rawEmotion, now);
+                    // --- SMOOTHED CLOTH COLOR ---
+                    const smoothedCloth = getSmoothedState(studentId, 'cloth', rawCloth, now);
+
+                    // Draw info
                     ctx.fillStyle = '#4caf50';
                     ctx.font = 'bold 18px Arial';
                     ctx.fillText(`✅ ${result.studentName}`, box.x, box.y - 28);
@@ -685,18 +739,25 @@ async function detectAndRecognize() {
                     }
                     ctx.font = '14px Arial';
                     ctx.fillStyle = '#ffffff';
-                    ctx.fillText(`😊 ${result.emotion}`, box.x, box.y + box.height + 20);
-                    // Hiển thị màu áo và phụ kiện
+                    ctx.fillText(`😊 ${smoothedEmotion}`, box.x, box.y + box.height + 20);
+                    // Show cloth & accessories
                     ctx.font = '12px Arial';
                     ctx.fillStyle = '#ffd700';
-                    let extra = `Áo: ${cloth}`;
+                    let extra = `Áo: ${smoothedCloth}`;
                     if (acc.hasMask) extra += ', 😷';
                     if (acc.hasGlasses) extra += ', 👓';
                     if (acc.hasHat) extra += ', 🎩';
                     ctx.fillText(extra, box.x, box.y + box.height + 40);
 
-                    // --- Gửi ảnh điểm danh qua Telegram (lần đầu trong ngày) ---
-                    const studentId = result.studentId;
+                    // Hiển thị confidence score (từ distance)
+                    if (result.distance !== null) {
+                        const confidence = Math.round((1 - result.distance) * 100);
+                        ctx.fillStyle = '#00bcd4';
+                        ctx.font = '12px Arial';
+                        ctx.fillText(`Độ tin cậy: ${confidence}%`, box.x, box.y + box.height + 60);
+                    }
+
+                    // Send attendance photo to Telegram (first time today)
                     if (!attendanceSentToday.has(studentId) && croppedImg) {
                         attendanceSentToday.add(studentId);
                         try {
@@ -714,45 +775,26 @@ async function detectAndRecognize() {
                         }
                     }
 
-                    // --- Negative emotion alert ---
-                    const emotion = result.emotion;
-                    if (NEGATIVE_EMOTIONS.includes(emotion)) {
+                    // Negative emotion alert (using raw emotion to trigger alerts)
+                    if (NEGATIVE_EMOTIONS.includes(rawEmotion)) {
                         if (!negativeEmotionCount[studentId]) negativeEmotionCount[studentId] = 0;
                         negativeEmotionCount[studentId]++;
                         if (negativeEmotionCount[studentId] >= NEGATIVE_EMOTION_THRESHOLD) {
-                            sendBehaviorAlert(studentId, `Cảm xúc tiêu cực kéo dài (${emotion})`);
+                            sendBehaviorAlert(studentId, `Cảm xúc tiêu cực kéo dài (${rawEmotion})`);
                             negativeEmotionCount[studentId] = 0;
                         }
                     } else {
                         negativeEmotionCount[studentId] = 0;
                     }
 
-                    // --- Behavior detection (face + hands) ---
+                    // Behavior detection (face + hands) - only when runSubtasks
                     if (runSubtasks) {
-                        await detectBehavior(validDetections[idx].landmarks, box, studentId, result.studentName);
+                        await detectBehavior(limitedDetections[idx].landmarks, box, studentId, result.studentName);
                     }
 
-                    // --- Anti-spoofing: blink detection ---
-                    const ear = calculateEAR(validDetections[idx].landmarks);
-                    const now = Date.now();
-                    if (ear < BLINK_THRESHOLD && now - lastBlinkTime > MIN_BLINK_INTERVAL) {
-                        blinkCount++;
-                        lastBlinkTime = now;
-                        blinkWarningShown = false; // có blink mới -> reset cảnh báo
-                    }
-                    // Nếu không có blink trong NO_BLINK_WARNING_MS liên tục, cảnh báo 1 lần (không chặn điểm danh)
-                    if (now - lastBlinkTime > NO_BLINK_WARNING_MS && blinkCount === 0) {
-                        if (!blinkWarningShown) {
-                            console.warn('⚠️ No blink detected – possible spoof');
-                            blinkWarningShown = true;
-                        }
-                        ctx.fillStyle = '#ff0000';
-                        ctx.font = '12px Arial';
-                        ctx.fillText('⚠️ Có thể là ảnh giả', box.x, box.y + box.height + 60);
-                    } else {
-                        // reset sau khi có blink
-                        if (now - lastBlinkTime < 2000) blinkCount = 0; // reset để đo lại
-                    }
+                    // ============================================================
+                    // BLINK DETECTION - REMOVED (no spoof warnings)
+                    // ============================================================
 
                 } else {
                     ctx.fillStyle = '#ff9800';
@@ -765,6 +807,19 @@ async function detectAndRecognize() {
         }
     } catch (err) {
         console.error('Lỗi gửi descriptor:', err);
+        // Hiển thị thông báo lỗi trên UI (nếu có element)
+        if (statusEl) {
+            statusEl.textContent = '⚠️ Lỗi kết nối server';
+            statusEl.style.background = '#fff3e0';
+            statusEl.style.color = '#e65100';
+            setTimeout(() => {
+                if (isModelLoaded) {
+                    statusEl.textContent = '✅ Sẵn sàng';
+                    statusEl.style.background = '#e8f5e9';
+                    statusEl.style.color = '#2e7d32';
+                }
+            }, 3000);
+        }
     }
 }
 
@@ -799,8 +854,8 @@ async function autoRegisterFromSamples() {
                 continue;
             }
             const detection = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({
-                inputSize: DETECTOR_INPUT_SIZE,
-                scoreThreshold: DETECTOR_SCORE_THRESHOLD
+                inputSize: CONFIG.DETECTOR_INPUT_SIZE,
+                scoreThreshold: CONFIG.DETECTOR_SCORE_THRESHOLD
             }))
             .withFaceLandmarks()
             .withFaceDescriptor()
@@ -906,8 +961,8 @@ submitRegister.addEventListener('click', async function() {
     img.src = URL.createObjectURL(file);
     await img.decode();
     const detection = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({
-        inputSize: DETECTOR_INPUT_SIZE,
-        scoreThreshold: DETECTOR_SCORE_THRESHOLD
+        inputSize: CONFIG.DETECTOR_INPUT_SIZE,
+        scoreThreshold: CONFIG.DETECTOR_SCORE_THRESHOLD
     }))
     .withFaceLandmarks()
     .withFaceDescriptor()

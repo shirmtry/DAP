@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 30
+    },
+    "auditLog": "C:\\Users\\admin\\Desktop\\FB\\video\\classroom-monitor\\backend\\logs\\.d5ff53f344531f051d23e9afe9dd5927f35699b1-audit.json",
+    "files": [
+        {
+            "date": 1783006008050,
+            "name": "C:\\Users\\admin\\Desktop\\FB\\video\\classroom-monitor\\backend\\logs\\combined-2026-07-02.log",
+            "hash": "a2a42dd15b11a208fcdc48a045077ac979622c643a9776f2cf1e6461ac12d3e3"
+        }
+    ],
+    "hashType": "sha256"
+}
