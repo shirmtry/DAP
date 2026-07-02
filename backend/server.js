@@ -432,9 +432,9 @@ async function updateAttendance(studentId, studentName) {
         await logAttendance(studentId, studentName);
         await logEvent(studentId, studentName, 'attendance', {});
         broadcast({ type: 'attendance', studentId, studentName, timestamp: new Date().toISOString() });
-        logger.debug(`Attendance: ${studentName} (${studentId})`);
+        logger.info(`✅ Điểm danh: ${studentName} (${studentId})`);
     } catch (err) {
-        logger.error('updateAttendance error:', err);
+        logger.error(`❌ updateAttendance error cho ${studentId}: ${err.message}`);
     }
 }
 
@@ -547,7 +547,7 @@ app.post('/api/register', authenticate, rateLimit(10, 60000), async (req, res) =
 
 // 2. Recognize multiple faces
 let lastEmotion = {};
-app.post('/api/recognize-multiple', authenticate, rateLimit(100, 60000), async (req, res) => {
+app.post('/api/recognize-multiple', authenticate, rateLimit(300, 60000), async (req, res) => {
     try {
         const { descriptors, emotions, croppedImages, ageGenders } = req.body;
         if (!descriptors || !Array.isArray(descriptors) || descriptors.length === 0) {
@@ -646,13 +646,55 @@ app.post('/api/behavior', authenticate, rateLimit(50, 60000), async (req, res) =
         if (!student) return res.status(404).json({ error: 'Student not found' });
         await logEvent(studentId, student.name, 'behavior', { behavior });
         broadcast({ type: 'behavior', studentId, studentName: student.name, behavior, timestamp: timestamp || new Date().toISOString() });
+        logger.info(`🚨 Cảnh báo hành vi: ${student.name} (${studentId}) - ${behavior}`);
         if (bot) {
             const message = `🚨 *Cảnh báo hành vi!*\n\n👤 ${student.name} (${student.id})\n⚠️ Hành vi: ${behavior}\n🕐 ${timestamp || getVietnamTime()}`;
-            await bot.sendMessage(process.env.TELEGRAM_CHAT_ID, message, { parse_mode: 'Markdown' });
+            try {
+                await bot.sendMessage(process.env.TELEGRAM_CHAT_ID, message, { parse_mode: 'Markdown' });
+            } catch (tgErr) {
+                logger.error(`❌ Lỗi gửi cảnh báo hành vi qua Telegram: ${tgErr.message}`);
+            }
         }
         res.json({ success: true });
     } catch (err) {
         logger.error('Behavior alert error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 5b. Attendance notify (send photo to Telegram on first attendance of the day)
+app.post('/api/attendance-notify', authenticate, rateLimit(10, 60000), async (req, res) => {
+    try {
+        const { studentId, studentName, image } = req.body;
+        if (!studentId || !studentName || !image) {
+            return res.status(400).json({ error: 'Missing studentId, studentName or image' });
+        }
+
+        const today = new Date().toISOString().slice(0, 10);
+        const presentIds = await getAttendanceByDate(today);
+
+        if (!presentIds.includes(studentId)) {
+            await logAttendance(studentId, studentName);
+            await logEvent(studentId, studentName, 'attendance', {});
+            broadcast({ type: 'attendance', studentId, studentName, timestamp: new Date().toISOString() });
+            logger.info(`✅ Điểm danh (kèm ảnh): ${studentName} (${studentId})`);
+        }
+
+        if (bot && process.env.TELEGRAM_CHAT_ID) {
+            try {
+                const base64Data = image.replace(/^data:image\/jpeg;base64,/, '');
+                const buffer = Buffer.from(base64Data, 'base64');
+                const caption = `✅ *Điểm danh thành công*\n\n👤 ${studentName} (${studentId})\n🕐 ${getVietnamTime()}`;
+                await bot.sendPhoto(process.env.TELEGRAM_CHAT_ID, buffer, { caption, parse_mode: 'Markdown' });
+                logger.info(`📸 Đã gửi ảnh điểm danh cho ${studentName} (${studentId})`);
+            } catch (tgErr) {
+                logger.error(`❌ Lỗi gửi ảnh điểm danh qua Telegram: ${tgErr.message}`);
+            }
+        }
+
+        res.json({ success: true });
+    } catch (err) {
+        logger.error('Attendance notify error:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -843,6 +885,68 @@ app.get('/api/send-report', async (req, res) => {
         res.send('✅ Báo cáo đã được gửi qua Telegram!');
     } catch (err) {
         res.status(500).send('❌ Lỗi: ' + err.message);
+    }
+});
+
+// 15. Reports (CSV / weekly stats) — used by dashboard.js
+function toCsvValue(v) {
+    const s = (v === null || v === undefined) ? '' : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+app.get('/api/report/csv', async (req, res) => {
+    try {
+        const today = new Date().toISOString().slice(0, 10);
+        const allStudents = await getStudentsWithGender();
+        const presentIds = new Set(await getAttendanceByDate(today));
+        const rows = [['Mã số', 'Họ tên', 'Trạng thái', 'Ngày']];
+        allStudents.forEach(s => {
+            rows.push([s.studentId, s.studentName, presentIds.has(s.studentId) ? 'Có mặt' : 'Vắng', today]);
+        });
+        const csv = '\uFEFF' + rows.map(r => r.map(toCsvValue).join(',')).join('\n');
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename=diemdanh_${today}.csv`);
+        res.send(csv);
+    } catch (err) {
+        logger.error('Report CSV error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/report/week/:date', async (req, res) => {
+    try {
+        const { date } = req.params;
+        const allStudents = await getStudentsWithGender();
+        const presentIds = await getAttendanceByDate(date);
+        const present = presentIds.length;
+        const absent = Math.max(0, allStudents.length - present);
+        res.json({ date, present, absent, total: allStudents.length });
+    } catch (err) {
+        logger.error('Report week error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/report/week-csv/:date', async (req, res) => {
+    try {
+        const { date: endDate } = req.params;
+        const allStudents = await getStudentsWithGender();
+        const rows = [['Ngày', 'Có mặt', 'Vắng', 'Tổng']];
+        const end = new Date(endDate);
+        for (let i = 6; i >= 0; i--) {
+            const d = new Date(end);
+            d.setDate(d.getDate() - i);
+            const dateStr = d.toISOString().slice(0, 10);
+            const presentIds = await getAttendanceByDate(dateStr);
+            rows.push([dateStr, presentIds.length, Math.max(0, allStudents.length - presentIds.length), allStudents.length]);
+        }
+        const csv = '\uFEFF' + rows.map(r => r.map(toCsvValue).join(',')).join('\n');
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename=baocao_tuan_${endDate}.csv`);
+        res.send(csv);
+    } catch (err) {
+        logger.error('Report week-csv error:', err);
+        res.status(500).json({ error: err.message });
     }
 });
 

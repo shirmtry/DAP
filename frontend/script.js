@@ -38,7 +38,7 @@ const submitRegister = document.getElementById('submitRegister');
 const DETECTOR_INPUT_SIZE = 320;
 const DETECTOR_SCORE_THRESHOLD = 0.5;
 const DETECTION_MAX_WIDTH = 640;
-const FRAME_SKIP = 5;
+const FRAME_SKIP = 10;
 const SUBTASK_EVERY_N_CYCLES = 3;
 const CROP_EVERY_N_CYCLES = 2;
 const STUDENT_LIST_REFRESH_INTERVAL = 30000;
@@ -398,7 +398,8 @@ async function loadMediaPipeModels() {
         handsInitialized = true;
         console.log('✅ MediaPipe Hands loaded');
     } catch (err) {
-        console.warn('⚠️ Không tải được MediaPipe Hands:', err.message);
+        console.warn('⚠️ Không tải được MediaPipe Hands (có thể bị Tracking Prevention chặn), sẽ bỏ qua phát hiện giơ tay/che mặt:', err.message);
+        handsInitialized = false;
     }
 }
 
@@ -411,6 +412,7 @@ const attentionTracker = {
     drowsyStart: null,
     distractedStart: null,
     coveredStart: null,
+    handRaisedStart: null,
     lastAlertTime: 0
 };
 
@@ -450,28 +452,26 @@ function getHeadOrientation(landmarks) {
 }
 
 async function detectBehavior(faceLandmarks, faceBox, studentId, studentName) {
-    if (!handsInitialized) return;
-
-    // 1. Drowsiness (head down + low EAR)
+    // 1. Drowsiness (head down + low EAR) — cảnh báo sau khi kéo dài > 1.5s
     const { pitch, yawRatio } = getHeadOrientation(faceLandmarks);
     const ear = calculateEAR(faceLandmarks);
-    const isDrowsy = (pitch > 25 && ear < 0.25);
+    const isDrowsy = (pitch > 20 && ear < 0.25);
     if (isDrowsy) {
         if (!attentionTracker.isDrowsy) {
             attentionTracker.isDrowsy = true;
             attentionTracker.drowsyStart = Date.now();
         }
         const duration = (Date.now() - attentionTracker.drowsyStart) / 1000;
-        if (duration > 10) { // > 10 seconds
+        if (duration > 1.5) {
             await sendBehaviorAlert(studentId, 'Buồn ngủ / cúi đầu lâu');
-            attentionTracker.drowsyStart = Date.now(); // reset
+            attentionTracker.drowsyStart = Date.now(); // reset để tránh spam liên tục
         }
     } else {
         attentionTracker.isDrowsy = false;
         attentionTracker.drowsyStart = null;
     }
 
-    // 2. Distracted (looking sideways)
+    // 2. Distracted (looking sideways) — cảnh báo sau khi kéo dài > 2s
     const isDistracted = (yawRatio < 0.6 || yawRatio > 1.4);
     if (isDistracted) {
         if (!attentionTracker.isDistracted) {
@@ -479,7 +479,7 @@ async function detectBehavior(faceLandmarks, faceBox, studentId, studentName) {
             attentionTracker.distractedStart = Date.now();
         }
         const duration = (Date.now() - attentionTracker.distractedStart) / 1000;
-        if (duration > 5) { // > 5 seconds
+        if (duration > 2) {
             await sendBehaviorAlert(studentId, 'Quay ngang / mất tập trung');
             attentionTracker.distractedStart = Date.now();
         }
@@ -489,6 +489,7 @@ async function detectBehavior(faceLandmarks, faceBox, studentId, studentName) {
     }
 
     // 3. Face covered / Hand raising using MediaPipe Hands
+    if (!handsInitialized || !handsModel) return;
     try {
         const handsResult = await new Promise((resolve) => {
             handsModel.onResults((results) => resolve(results));
@@ -508,24 +509,34 @@ async function detectBehavior(faceLandmarks, faceBox, studentId, studentName) {
             if (distToFace < faceSize * 0.2) {
                 await sendBehaviorAlert(studentId, 'Che mặt');
             }
-            // Hand raised: wrist y < face top
-            if (wrist.y < faceBox.top * 0.95) {
-                // Check if fingers spread (approximate)
-                const indexTip = hand[8];
-                const pinkyTip = hand[20];
-                const spread = Math.hypot(indexTip.x - pinkyTip.x, indexTip.y - pinkyTip.y);
-                if (spread > 0.05) { // open hand
-                    await sendBehaviorAlert(studentId, 'Giơ tay phát biểu');
+
+            // Hand raised: wrist above the top of the face box, persisted > 1s
+            const indexTip = hand[8];
+            const pinkyTip = hand[20];
+            const spread = Math.hypot(indexTip.x - pinkyTip.x, indexTip.y - pinkyTip.y);
+            const handIsRaised = (wrist.y < faceBox.top * 0.95) && (spread > 0.05);
+
+            if (handIsRaised) {
+                if (!attentionTracker.handRaised) {
+                    attentionTracker.handRaised = true;
+                    attentionTracker.handRaisedStart = Date.now();
                 }
+                const duration = (Date.now() - attentionTracker.handRaisedStart) / 1000;
+                if (duration > 1) {
+                    await sendBehaviorAlert(studentId, 'Giơ tay phát biểu');
+                    attentionTracker.handRaisedStart = Date.now();
+                }
+            } else {
+                attentionTracker.handRaised = false;
+                attentionTracker.handRaisedStart = null;
             }
+        } else {
+            attentionTracker.handRaised = false;
+            attentionTracker.handRaisedStart = null;
         }
     } catch (err) {
         // hands may not be ready
     }
-
-    // 4. Attention timer (10 minutes total inattention)
-    // Đơn giản: nếu phát hiện drowsy hoặc distracted trong 10 phút liên tục, gửi cảnh báo tổng hợp.
-    // (sẽ được xử lý ở vòng lặp riêng bên dưới)
 }
 
 // Hàm gửi alert (đã có)
@@ -552,8 +563,10 @@ async function sendBehaviorAlert(studentId, behavior) {
 // ==================== FACE DETECTION & RECOGNITION ====================
 let lastBlinkTime = 0;
 let blinkCount = 0;
+let blinkWarningShown = false;
 const BLINK_THRESHOLD = 0.22;
 const MIN_BLINK_INTERVAL = 150;
+const NO_BLINK_WARNING_MS = 10000; // tăng từ 5s lên 10s để giảm cảnh báo giả
 
 async function detectAndRecognize() {
     if (!isModelLoaded) return;
@@ -725,10 +738,14 @@ async function detectAndRecognize() {
                     if (ear < BLINK_THRESHOLD && now - lastBlinkTime > MIN_BLINK_INTERVAL) {
                         blinkCount++;
                         lastBlinkTime = now;
+                        blinkWarningShown = false; // có blink mới -> reset cảnh báo
                     }
-                    // Nếu không có blink trong 5 giây liên tục, cảnh báo (nhưng không chặn điểm danh)
-                    if (now - lastBlinkTime > 5000 && blinkCount === 0) {
-                        console.warn('⚠️ No blink detected – possible spoof');
+                    // Nếu không có blink trong NO_BLINK_WARNING_MS liên tục, cảnh báo 1 lần (không chặn điểm danh)
+                    if (now - lastBlinkTime > NO_BLINK_WARNING_MS && blinkCount === 0) {
+                        if (!blinkWarningShown) {
+                            console.warn('⚠️ No blink detected – possible spoof');
+                            blinkWarningShown = true;
+                        }
                         ctx.fillStyle = '#ff0000';
                         ctx.font = '12px Arial';
                         ctx.fillText('⚠️ Có thể là ảnh giả', box.x, box.y + box.height + 60);
